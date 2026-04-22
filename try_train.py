@@ -139,7 +139,10 @@ def run(cfg):
     data_module = spt.data.DataModule(train=train, val=val)
     world_model = spt.Module(
         model=world_model,
-        sigreg=SIGReg(**cfg.loss.sigreg.kwargs),
+        sigreg=SIGReg(
+            num_proj=cfg.loss.sigreg.num_proj,
+            num_knot=cfg.loss.sigreg.knots,
+        ),
         forward=partial(lejepa_forward, cfg=cfg),
         optim=optimizers,
     )
