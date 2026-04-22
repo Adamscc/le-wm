@@ -152,7 +152,8 @@ def run(cfg):
     ##########################
 
     run_id = cfg.get("subdir") or ""
-    run_dir = Path(swm.data.utils.get_cache_dir(), run_id)
+    # run_dir = Path(swm.data.utils.get_cache_dir(), run_id)
+    run_dir = Path("/kaggle/working", run_id)
 
     logger = None
     if cfg.wandb.enabled:
@@ -181,6 +182,7 @@ def run(cfg):
         data=data_module,
         ckpt_path=run_dir / f"{cfg.output_model_name}_weights.ckpt",
     )
+    manager.init_and_sync_wandb = lambda: None
 
     manager()
     return
