@@ -175,6 +175,7 @@ def run(cfg):
         data=data_module,
         ckpt_path=run_dir / f"{cfg.output_model_name}_weights.ckpt",
     )
+    manager.init_and_sync_wandb = lambda: None
 
     manager()
     return
