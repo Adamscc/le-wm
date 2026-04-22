@@ -145,7 +145,8 @@ def run(cfg):
     ##########################
 
     run_id = cfg.get("subdir") or ""
-    run_dir = Path(swm.data.utils.get_cache_dir(), run_id)
+    # run_dir = Path(swm.data.utils.get_cache_dir(), run_id)
+    run_dir = Path("/kaggle/working", run_id)
 
     logger = None
     if cfg.wandb.enabled:
