@@ -273,7 +273,7 @@ class Lewm(nn.Module):
         emb_init = rearrange(emb_init, '(b t) d -> b t d', b=B)
         emb_init = emb_init.unsequeeze(1).expand(B, S, -1, -1)
         info['emb'] = emb_init
-        emb = rearrange(emb_init, 'b s t d -> (b s) t d')
+        emb = rearrange(emb_init, 'b s t d -> (b s) t d').clone()
         act = rearrange(act_init, 'b s t d -> (b s) t d')
         act_future = rearrange(act_future, 'b s t d -> (b s) t d')
 
@@ -298,20 +298,8 @@ class Lewm(nn.Module):
     def criterion(self, info):
         pass
 
-
     def get_cost(self, info):
         pass
-
-
-
-
-
-
-
-
-
-
-
 
 
 class TwoRoomH5Dataset(Dataset):
@@ -548,22 +536,23 @@ def train_with_adamw(
     weight_decay=1e-3,
     diag_every=20,
     log_dir=None,
-    warmup_ratio=0.1,
+    warmup_ratio=0.01,
+    grad_clip_val=1.0,
     device="cuda" if torch.cuda.is_available() else "cpu",
 ):
     model = model.to(device)
     sigreg = sigreg.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     total_steps = epochs * len(train_loader)
-    warmup_steps = max(1, int(total_steps * warmup_ratio))  # 确保至少有 1 步 warmup
+    warmup_steps = max(1, int(total_steps * warmup_ratio))
 
-    # 1. 预热阶段：学习率从 lr * 1e-3 线性增长到 lr
+    # 1. 预热阶段：学习率从 0 线性增长到 lr（与官方 LinearWarmupCosineAnnealingLR 对齐）
     warmup_scheduler = LinearLR(
-        optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_steps
+        optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_steps
     )
-    # 2. 退火阶段：学习率从 lr 按照余弦曲线衰减到接近 0 (1e-6)
+    # 2. 退火阶段：学习率从 lr 按照余弦曲线衰减到 0
     cosine_scheduler = CosineAnnealingLR(
-        optimizer, T_max=total_steps - warmup_steps, eta_min=1e-6
+        optimizer, T_max=total_steps - warmup_steps, eta_min=0.0
     )
     # 3. 拼接调度器：在 warmup_steps 时点进行切换
     scheduler = SequentialLR(
@@ -625,6 +614,8 @@ def train_with_adamw(
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            if grad_clip_val is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_val)
             optimizer.step()
             scheduler.step()
 
@@ -811,7 +802,8 @@ if __name__ == "__main__":
         lr=5e-5,
         weight_decay=1e-3,
         log_dir=log_dir,
-        warmup_ratio=0.1
+        warmup_ratio=0.01,
+        grad_clip_val=1.0,
     )
     with open(f"{log_dir}/run_info.json", "w") as f:
         json.dump(
