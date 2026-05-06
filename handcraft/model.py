@@ -622,9 +622,9 @@ def train_with_adamw(
             running_loss += loss.item()
             current_lr = scheduler.get_last_lr()[0]
             pbar.set_postfix(
-                loss=f"{loss.item():.4f}",
-                pred=f"{pred_loss.item():.4f}",
-                reg=f"{reg_loss.item():.4f}",
+                l=f"{loss.item():.4f}",
+                p=f"{pred_loss.item():.4f}",
+                r=f"{reg_loss.item():.4f}",
                 lr=f"{current_lr:.2e}",
             )
             diag = {
@@ -790,7 +790,7 @@ if __name__ == "__main__":
     )
 
     run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = "/kaggle/working/outputstrain_logs_lewm09"
+    log_dir = "/kaggle/working/outputs/tworoom_lewm09_wr+clip"
     summary = train_with_adamw(
         model=lewm,
         sigreg=sigreg,
