@@ -5,7 +5,7 @@ defaults:
 output_model_name: lewm
 subdir: ${hydra:job.id}
 
-num_workers: 6
+num_workers: 2
 train_split: 0.9
 seed: 3072
 img_size: 224
@@ -63,5 +63,5 @@ loss:
       knots: 17
       num_proj: 1024
       dim: 192      # must match wm.embed_dim
-      rho: 0.0      # 0.0 = original isotropic; try 0.3/0.5 for adaptive diagonal
+      rho: 0.5      # 0.0 = original isotropic; try 0.3/0.5 for adaptive diagonal
       beta_sigma: 1e-3
