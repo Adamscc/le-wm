@@ -62,3 +62,6 @@ loss:
     kwargs:
       knots: 17
       num_proj: 1024
+      dim: 192      # must match wm.embed_dim
+      rho: 0.0      # 0.0 = original isotropic; try 0.3/0.5 for adaptive diagonal
+      beta_sigma: 1e-3

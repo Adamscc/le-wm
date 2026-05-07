@@ -8,11 +8,20 @@ def modulate(x, shift, scale):
     return x * (1 + scale) + shift
 
 class SIGReg(torch.nn.Module):
-    """Sketch Isotropic Gaussian Regularizer (single-GPU!)"""
+    """Sketch Isotropic Gaussian Regularizer (single-GPU!).
 
-    def __init__(self, knots=17, num_proj=1024):
+    When rho=0 (default), target is N(0, I) — identical to original behaviour.
+    When rho>0, target is N(0, diag(sigma^2)) with mean(sigma^2)=1, implemented
+    via learnable alpha: sigma_i^2 = (1-rho) + rho*d*softmax(alpha)_i.
+    Each random projection u then targets N(0, u^T Sigma u) instead of N(0,1).
+    """
+
+    def __init__(self, knots=17, num_proj=1024, dim=None, rho=0.0, beta_sigma=1e-3):
         super().__init__()
         self.num_proj = num_proj
+        self.rho = rho
+        self.beta_sigma = beta_sigma
+
         t = torch.linspace(0, 3, knots, dtype=torch.float32)
         dt = 3 / (knots - 1)
         weights = torch.full((knots,), 2 * dt, dtype=torch.float32)
@@ -22,18 +31,47 @@ class SIGReg(torch.nn.Module):
         self.register_buffer("phi", window)
         self.register_buffer("weights", weights * window)
 
+        if rho > 0.0:
+            assert dim is not None, "dim must be provided when rho > 0"
+            self.dim = dim
+            # init to zeros so softmax is uniform => sigma^2 = 1, same as isotropic
+            self.alpha = nn.Parameter(torch.zeros(dim))
+
+    def _get_sigma2(self):
+        """Per-dimension target variance; mean == 1, each dim >= (1 - rho)."""
+        p = torch.softmax(self.alpha, dim=0)
+        return (1.0 - self.rho) + self.rho * self.dim * p
+
     def forward(self, proj):
         """
         proj: (T, B, D)
         """
-        # sample random projections
         A = torch.randn(proj.size(-1), self.num_proj, device=proj.device)
         A = A.div_(A.norm(p=2, dim=0))
-        # compute the epps-pulley statistic
+
         x_t = (proj @ A).unsqueeze(-1) * self.t
-        err = (x_t.cos().mean(-3) - self.phi).square() + x_t.sin().mean(-3).square()
+        cos_emp = x_t.cos().mean(-3)  # (T, M, K)
+        sin_emp = x_t.sin().mean(-3)  # (T, M, K)
+
+        if self.rho > 0.0:
+            # per-projection target variance: var_u = u^T Sigma u, shape (M,)
+            sigma2 = self._get_sigma2()
+            var_u = (A.pow(2) * sigma2.unsqueeze(1)).sum(dim=0)
+            # target CF: exp(-0.5 * var_u * t^2), shape (1, M, K)
+            target_phi = torch.exp(
+                -0.5 * var_u.view(1, self.num_proj, 1) * self.t.view(1, 1, -1).pow(2)
+            )
+            err = (cos_emp - target_phi).pow(2) + sin_emp.pow(2)
+        else:
+            err = (cos_emp - self.phi).pow(2) + sin_emp.pow(2)
+
         statistic = (err @ self.weights) * proj.size(-2)
-        return statistic.mean() # average over projections and time
+        loss = statistic.mean()
+
+        if self.rho > 0.0:
+            loss = loss + self.beta_sigma * self.alpha.pow(2).mean()
+
+        return loss
     
 class FeedForward(nn.Module):
     """FeedForward network used in Transformers"""
