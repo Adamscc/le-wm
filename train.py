@@ -71,7 +71,7 @@ def lejepa_forward(self, batch, stage, cfg):
         off_mask = ~torch.eye(D_lat, dtype=torch.bool, device=cov.device)
         diag[f"{stage}/latent/cov_offdiag_abs"] = cov[off_mask].abs().mean()
 
-        eigvals = torch.linalg.eigvalsh(cov).clamp(min=0)   # ascending order
+        eigvals = torch.linalg.eigvalsh(cov.float()).clamp(min=0)   # ascending order; eigvalsh不支持bf16
         diag[f"{stage}/latent/eig_min"]       = eigvals[0]
         diag[f"{stage}/latent/eig_max"]       = eigvals[-1]
         diag[f"{stage}/latent/effective_dim"] = (
