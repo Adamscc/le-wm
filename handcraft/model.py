@@ -38,15 +38,15 @@ def scaled_dot_product_attention(Q, K, V, is_causal=True, is_traning=False, drop
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, head, head_dim, dim, dropout=0.0):
+    def __init__(self, head, head_dim, dim, dropout=0.0, qkv_bias=True):
         super().__init__()
         self.h = head
         self.dim = dim
         self.head_dim = head_dim
         self.head = head
-        self.linear_q = nn.Linear(in_features=dim, out_features=head*head_dim, bias=False)
-        self.linear_k = nn.Linear(in_features=dim, out_features=head*head_dim, bias=False)
-        self.linear_v = nn.Linear(in_features=dim, out_features=head*head_dim, bias=False)
+        self.linear_q = nn.Linear(in_features=dim, out_features=head*head_dim, bias=qkv_bias)
+        self.linear_k = nn.Linear(in_features=dim, out_features=head*head_dim, bias=qkv_bias)
+        self.linear_v = nn.Linear(in_features=dim, out_features=head*head_dim, bias=qkv_bias)
         self.dropout = dropout
         self.out = nn.Sequential(
             nn.Linear(in_features=head*head_dim, out_features=dim),
@@ -91,9 +91,9 @@ class FFN(nn.Module):
 class TransformerBlock(nn.Module):
     def __init__(self, dim, mlp_dim, head, head_dim, dropout=0.0, is_causal=True):
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim, eps=1e-6)
-        self.norm2 = nn.LayerNorm(dim, eps=1e-6)
-        self.attention = MultiHeadAttention(dim=dim, head_dim=head_dim, head=head, dropout=dropout)
+        self.norm1 = nn.LayerNorm(dim, eps=1e-12)
+        self.norm2 = nn.LayerNorm(dim, eps=1e-12)
+        self.attention = MultiHeadAttention(dim=dim, head_dim=head_dim, head=head, dropout=dropout, qkv_bias=True)
         self.ffn = FFN(dim=dim, hidden_dim=mlp_dim, dropout=dropout)
         self.is_causal = is_causal
 
@@ -193,12 +193,27 @@ class Encoder(nn.Module):
     def __init__(self, hidden_dim, patch_size, depth, head, img_size, dropout=0.0):
         super().__init__()
         self.init_conv = nn.Conv2d(in_channels=3, out_channels=hidden_dim, kernel_size=patch_size, stride=patch_size)
-        self.pos_emb = nn.Parameter(torch.randn(1, (img_size[0]//patch_size)**2+1, hidden_dim))
+        self.norm = nn.LayerNorm(hidden_dim, eps=1e-12)
+        self.pos_emb = nn.Parameter(torch.zeros(1, (img_size[0]//patch_size)**2+1, hidden_dim))
         self.transformer = nn.ModuleList([TransformerBlock(dim=hidden_dim, mlp_dim=hidden_dim*4,
                                                            head_dim=hidden_dim//head, head=head,
                                                            is_causal=False, dropout=dropout)
                                           for _ in range(depth)])
-        self.cls = nn.Parameter(torch.randn(1, hidden_dim))
+        self.cls = nn.Parameter(torch.zeros(1, hidden_dim))
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.trunc_normal_(self.pos_emb, std=0.02)
+        nn.init.trunc_normal_(self.init_conv.weight, std=0.02)
+        nn.init.zeros_(self.init_conv.bias)
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
 
     def forward(self, x):
         x = self.init_conv(x)
@@ -207,6 +222,7 @@ class Encoder(nn.Module):
         x = x + self.pos_emb
         for layer in self.transformer:
             x = layer(x)
+        x = self.norm(x)
         return x[:, 0, :]
 
 class MLP(nn.Module):
@@ -593,8 +609,9 @@ def train_with_adamw(
     for epoch in range(epochs):
         model.train()
         running_loss = 0.0
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}", leave=True)
-        for step, batch in enumerate(pbar, start=1):
+        # pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}", leave=True)
+        # for step, batch in enumerate(pbar, start=1):
+        for step, batch in enumerate(train_loader, start=1):
             global_step += 1
             pixels = batch["pixels"].to(device)    # (B, T, C, H, W)
             actions = batch["action"].to(device)   # (B, T, A_eff)
@@ -621,12 +638,13 @@ def train_with_adamw(
 
             running_loss += loss.item()
             current_lr = scheduler.get_last_lr()[0]
-            pbar.set_postfix(
-                l=f"{loss.item():.4f}",
-                p=f"{pred_loss.item():.4f}",
-                r=f"{reg_loss.item():.4f}",
-                lr=f"{current_lr:.2e}",
-            )
+            # pbar.set_postfix(
+            #     l=f"{loss.item():.4f}",
+            #     p=f"{pred_loss.item():.4f}",
+            #     r=f"{reg_loss.item():.4f}",
+            #     lr=f"{current_lr:.2e}",
+            # )
+            print(f"epoch[{epoch}/{epochs}], step[{step}], loss={loss.item():.4f}, pred={pred_loss.item():.4f}, reg={reg_loss.item():.4f}, lr={current_lr:.2e}")
             diag = {
                 "pred_var": float("nan"),
                 "tgt_var": float("nan"),
@@ -712,16 +730,13 @@ if __name__ == "__main__":
     #encoder config
     emb_dim = 192
     patch_size = 14
-    depth = 12
-    head = 3
     img_size = (224, 224)
 
-    # 实例化
     encoder = Encoder(
         hidden_dim=emb_dim,
         patch_size=patch_size,
-        depth=depth,
-        head=head,
+        depth=12,
+        head=3,
         img_size=img_size,
     )
 

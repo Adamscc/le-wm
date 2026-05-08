@@ -35,7 +35,7 @@ optimizer:
 wandb:
   enabled: True
   config:
-    entity: adamsc
+    entity: shuangc24
     project: lewm
     name: ${output_model_name}
     id: ${subdir}
