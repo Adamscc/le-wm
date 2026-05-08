@@ -43,6 +43,42 @@ def lejepa_forward(self, batch, stage, cfg):
 
     losses_dict = {f"{stage}/{k}": v.detach() for k, v in output.items() if "loss" in k}
     self.log_dict(losses_dict, on_step=True, sync_dist=True)
+
+    # --- Diagnostic logging ---
+    diag = {}
+
+    # sigma2 / alpha stats — only when adaptive SIGReg (rho > 0) is active
+    if self.sigreg.rho > 0.0:
+        with torch.no_grad():
+            sigma2 = self.sigreg._get_sigma2()
+            diag[f"{stage}/sigma2/mean"]    = sigma2.mean()
+            diag[f"{stage}/sigma2/std"]     = sigma2.std()
+            diag[f"{stage}/sigma2/min"]     = sigma2.min()
+            diag[f"{stage}/sigma2/max"]     = sigma2.max()
+            diag[f"{stage}/alpha/mean_abs"] = self.sigreg.alpha.abs().mean()
+
+    # Latent distribution stats (VICReg-style collapse detection)
+    with torch.no_grad():
+        z = emb.detach().reshape(-1, emb.size(-1)).float()  # (N, D)
+        z_std = z.std(dim=0)                                # (D,)
+        diag[f"{stage}/latent/std_mean"] = z_std.mean()
+        diag[f"{stage}/latent/std_min"]  = z_std.min()
+        diag[f"{stage}/latent/std_max"]  = z_std.max()
+
+        z_c = z - z.mean(dim=0, keepdim=True)
+        cov = z_c.T @ z_c / (z.size(0) - 1)                # (D, D)
+        D_lat = cov.size(0)
+        off_mask = ~torch.eye(D_lat, dtype=torch.bool, device=cov.device)
+        diag[f"{stage}/latent/cov_offdiag_abs"] = cov[off_mask].abs().mean()
+
+        eigvals = torch.linalg.eigvalsh(cov).clamp(min=0)   # ascending order
+        diag[f"{stage}/latent/eig_min"]       = eigvals[0]
+        diag[f"{stage}/latent/eig_max"]       = eigvals[-1]
+        diag[f"{stage}/latent/effective_dim"] = (
+            eigvals.sum().pow(2) / eigvals.pow(2).sum().clamp(min=1e-8)
+        )
+
+    self.log_dict(diag, on_step=True, sync_dist=True)
     return output
 
 @hydra.main(version_base=None, config_path="./config/train", config_name="lewm")
