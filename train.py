@@ -130,6 +130,11 @@ def run(cfg):
             "scheduler": {"type": "LinearWarmupCosineAnnealingLR"},
             "interval": "epoch",
         },
+        'sigreg_opt': {
+            "modules": 'sigreg',
+            "optimizer": {"type": "AdamW", "lr": 1e-5, "weight_decay": 1e-4},
+            "interval": "epoch",
+        },
     }
 
     data_module = spt.data.DataModule(train=train, val=val)
@@ -146,7 +151,7 @@ def run(cfg):
 
     run_id = cfg.get("subdir") or ""
     # run_dir = Path(swm.data.utils.get_cache_dir(), run_id)
-    run_dir = Path("/kaggle/working", run_id)
+    run_dir = Path("/home/cs/le-wm/outputs", run_id)
 
     logger = None
     if cfg.wandb.enabled:

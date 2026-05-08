@@ -10,10 +10,11 @@ def modulate(x, shift, scale):
 class SIGReg(torch.nn.Module):
     """Sketch Isotropic Gaussian Regularizer (single-GPU!).
 
-    When rho=0 (default), target is N(0, I) — identical to original behaviour.
-    When rho>0, target is N(0, diag(sigma^2)) with mean(sigma^2)=1, implemented
-    via learnable alpha: sigma_i^2 = (1-rho) + rho*d*softmax(alpha)_i.
-    Each random projection u then targets N(0, u^T Sigma u) instead of N(0,1).
+    When rho=0 (default), target is N(0, I) via random projections — original behaviour.
+    When rho>0, target is N(0, diag(sigma^2)) with mean(sigma^2)=1, implemented via
+    axis-aligned projections: dimension i is tested directly against N(0, sigma_i^2).
+    alpha: sigma_i^2 = (1-rho) + rho*d*softmax(alpha)_i.
+    Axis-aligned projections make alpha gradients meaningful (no CLT averaging).
     """
 
     def __init__(self, knots=17, num_proj=1024, dim=None, rho=0.0, beta_sigma=1e-3):
@@ -46,30 +47,35 @@ class SIGReg(torch.nn.Module):
         """
         proj: (T, B, D)
         """
-        A = torch.randn(proj.size(-1), self.num_proj, device=proj.device)
-        A = A.div_(A.norm(p=2, dim=0))
-
-        x_t = (proj @ A).unsqueeze(-1) * self.t
-        cos_emp = x_t.cos().mean(-3)  # (T, M, K)
-        sin_emp = x_t.sin().mean(-3)  # (T, M, K)
-
         if self.rho > 0.0:
-            # per-projection target variance: var_u = u^T Sigma u, shape (M,)
-            sigma2 = self._get_sigma2()
-            var_u = (A.pow(2) * sigma2.unsqueeze(1)).sum(dim=0)
-            # target CF: exp(-0.5 * var_u * t^2), shape (1, M, K)
+            # Axis-aligned projections: test each dimension i against N(0, sigma_i^2).
+            # This directly exposes per-dim variance to alpha gradients, avoiding the
+            # CLT averaging that makes random projections blind to anisotropy.
+            # x_t: (T, B, D, K)
+            x_t = proj.unsqueeze(-1) * self.t
+            cos_emp = x_t.cos().mean(1)  # mean over B: (T, D, K)
+            sin_emp = x_t.sin().mean(1)  # (T, D, K)
+
+            sigma2 = self._get_sigma2()  # (D,)
             target_phi = torch.exp(
-                -0.5 * var_u.view(1, self.num_proj, 1) * self.t.view(1, 1, -1).pow(2)
-            )
-            err = (cos_emp - target_phi).pow(2) + sin_emp.pow(2)
-        else:
-            err = (cos_emp - self.phi).pow(2) + sin_emp.pow(2)
-
-        statistic = (err @ self.weights) * proj.size(-2)
-        loss = statistic.mean()
-
-        if self.rho > 0.0:
+                -0.5 * sigma2.view(1, self.dim, 1) * self.t.view(1, 1, -1).pow(2)
+            )  # (1, D, K)
+            err = (cos_emp - target_phi).pow(2) + sin_emp.pow(2)  # (T, D, K)
+            statistic = (err @ self.weights) * proj.size(1)  # (T, D), scaled by B
+            loss = statistic.mean()
             loss = loss + self.beta_sigma * self.alpha.pow(2).mean()
+        else:
+            # Original random projection behaviour
+            A = torch.randn(proj.size(-1), self.num_proj, device=proj.device)
+            A = A.div_(A.norm(p=2, dim=0))
+
+            x_t = (proj @ A).unsqueeze(-1) * self.t
+            cos_emp = x_t.cos().mean(-3)  # mean over B: (T, M, K)
+            sin_emp = x_t.sin().mean(-3)  # (T, M, K)
+
+            err = (cos_emp - self.phi).pow(2) + sin_emp.pow(2)
+            statistic = (err @ self.weights) * proj.size(-2)
+            loss = statistic.mean()
 
         return loss
     
