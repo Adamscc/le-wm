@@ -11,10 +11,14 @@ class SIGReg(torch.nn.Module):
     """Sketch Isotropic Gaussian Regularizer (single-GPU!).
 
     When rho=0 (default), target is N(0, I) via random projections — original behaviour.
-    When rho>0, target is N(0, diag(sigma^2)) with mean(sigma^2)=1, implemented via
-    axis-aligned projections: dimension i is tested directly against N(0, sigma_i^2).
-    alpha: sigma_i^2 = (1-rho) + rho*d*softmax(alpha)_i.
-    Axis-aligned projections make alpha gradients meaningful (no CLT averaging).
+    When rho>0, implements Whitened Adaptive SIGReg:
+        z ~ N(0, diag(sigma^2))  iff  z / sigma ~ N(0, I)
+    The latent is whitened by the learnable per-dim std sigma, then the original
+    random-projection SIGReg is applied to the whitened latent.  This checks the
+    full joint distribution (not just per-axis marginals) while still allowing an
+    anisotropic target covariance.
+    Parameterisation: sigma_i^2 = (1-rho) + rho*D*softmax(alpha)_i,
+    which keeps mean(sigma^2) == 1 and each sigma_i^2 >= (1-rho).
     """
 
     def __init__(self, knots=17, num_proj=1024, dim=None, rho=0.0, beta_sigma=1e-3):
@@ -43,39 +47,33 @@ class SIGReg(torch.nn.Module):
         p = torch.softmax(self.alpha, dim=0)
         return (1.0 - self.rho) + self.rho * self.dim * p
 
+    def _random_sigreg(self, z):
+        """Standard random-projection SIGReg against N(0, I). z: (T, B, D)."""
+        A = torch.randn(z.size(-1), self.num_proj, device=z.device, dtype=z.dtype)
+        A = A.div_(A.norm(p=2, dim=0))
+
+        x_t = (z @ A).unsqueeze(-1) * self.t
+        cos_emp = x_t.cos().mean(-3)  # mean over B: (T, M, K)
+        sin_emp = x_t.sin().mean(-3)  # (T, M, K)
+
+        err = (cos_emp - self.phi).pow(2) + sin_emp.pow(2)
+        statistic = (err @ self.weights) * z.size(-2)
+        return statistic.mean()
+
     def forward(self, proj):
         """
         proj: (T, B, D)
         """
         if self.rho > 0.0:
-            # Axis-aligned projections: test each dimension i against N(0, sigma_i^2).
-            # This directly exposes per-dim variance to alpha gradients, avoiding the
-            # CLT averaging that makes random projections blind to anisotropy.
-            # x_t: (T, B, D, K)
-            x_t = proj.unsqueeze(-1) * self.t
-            cos_emp = x_t.cos().mean(1)  # mean over B: (T, D, K)
-            sin_emp = x_t.sin().mean(1)  # (T, D, K)
+            # Whiten: z_white = z / sigma  =>  z_white ~ N(0, I)  if  z ~ N(0, diag(sigma^2))
+            sigma2 = self._get_sigma2().to(proj.dtype)          # (D,)
+            sigma = torch.sqrt(sigma2 + 1e-6)                   # (D,)
+            proj_white = proj / sigma.view(1, 1, -1)            # (T, B, D)
 
-            sigma2 = self._get_sigma2()  # (D,)
-            target_phi = torch.exp(
-                -0.5 * sigma2.view(1, self.dim, 1) * self.t.view(1, 1, -1).pow(2)
-            )  # (1, D, K)
-            err = (cos_emp - target_phi).pow(2) + sin_emp.pow(2)  # (T, D, K)
-            statistic = (err @ self.weights) * proj.size(1)  # (T, D), scaled by B
-            loss = statistic.mean()
+            loss = self._random_sigreg(proj_white)
             loss = loss + self.beta_sigma * self.alpha.pow(2).mean()
         else:
-            # Original random projection behaviour
-            A = torch.randn(proj.size(-1), self.num_proj, device=proj.device)
-            A = A.div_(A.norm(p=2, dim=0))
-
-            x_t = (proj @ A).unsqueeze(-1) * self.t
-            cos_emp = x_t.cos().mean(-3)  # mean over B: (T, M, K)
-            sin_emp = x_t.sin().mean(-3)  # (T, M, K)
-
-            err = (cos_emp - self.phi).pow(2) + sin_emp.pow(2)
-            statistic = (err @ self.weights) * proj.size(-2)
-            loss = statistic.mean()
+            loss = self._random_sigreg(proj)
 
         return loss
     
