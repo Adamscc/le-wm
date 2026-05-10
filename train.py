@@ -11,7 +11,10 @@ from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf, open_dict
 
 from jepa import JEPA
-from module import ARPredictor, Embedder, MLP, SIGReg
+from module import (
+    ARPredictor, Embedder, MLP, SIGReg, TDistSIGReg,
+    effective_rank_loss, SoftWhiteningSIGReg, SpectralRegularizer,
+)
 from utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBack
 
 
@@ -39,7 +42,22 @@ def lejepa_forward(self, batch, stage, cfg):
     # LeWM loss
     output["pred_loss"] = (pred_emb - tgt_emb).pow(2).mean()
     output["sigreg_loss"]= self.sigreg(emb.transpose(0, 1))
-    output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]  
+    output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]
+
+    # --- Route 1: Effective rank maximization ---
+    rank_cfg = cfg.loss.get("rank_reg", None)
+    if rank_cfg is not None and rank_cfg.get("enabled", False):
+        output["rank_loss"] = effective_rank_loss(
+            emb.transpose(0, 1),
+            min_var_threshold=rank_cfg.get("min_var_threshold", 0.01),
+        )
+        output["loss"] = output["loss"] + rank_cfg.weight * output["rank_loss"]
+
+    # --- Route 3: Spectral regularization ---
+    spectral_cfg = cfg.loss.get("spectral_reg", None)
+    if spectral_cfg is not None and spectral_cfg.get("enabled", False) and hasattr(self, "spectral_reg"):
+        output["spectral_loss"] = self.spectral_reg(emb.transpose(0, 1))
+        output["loss"] = output["loss"] + spectral_cfg.weight * output["spectral_loss"]
 
     losses_dict = {f"{stage}/{k}": v.detach() for k, v in output.items() if "loss" in k}
     self.log_dict(losses_dict, on_step=True, sync_dist=True)
@@ -56,6 +74,16 @@ def lejepa_forward(self, batch, stage, cfg):
             diag[f"{stage}/sigma2/min"]     = sigma2.min()
             diag[f"{stage}/sigma2/max"]     = sigma2.max()
             diag[f"{stage}/alpha/mean_abs"] = self.sigreg.alpha.abs().mean()
+
+    # Route 2: soft whitening tau
+    if isinstance(self.sigreg, SoftWhiteningSIGReg):
+        with torch.no_grad():
+            diag[f"{stage}/soft_whiten/tau"] = self.sigreg.tau.item()
+
+    # Route 3: spectral decay rate
+    if hasattr(self, "spectral_reg"):
+        with torch.no_grad():
+            diag[f"{stage}/spectral/decay_rate"] = self.spectral_reg.decay_rate.detach()
 
     # Latent distribution stats (VICReg-style collapse detection)
     with torch.no_grad():
@@ -159,6 +187,15 @@ def run(cfg):
         pred_proj=predictor_proj,
     )
 
+    # --- Choose SIGReg variant ---
+    sigreg_type = cfg.loss.sigreg.get("type", "gaussian")
+    if sigreg_type == "t_dist":
+        sigreg_module = TDistSIGReg(**cfg.loss.sigreg.kwargs)
+    elif cfg.loss.get("soft_whiten", {}).get("enabled", False):
+        sigreg_module = SoftWhiteningSIGReg(**cfg.loss.sigreg.kwargs)
+    else:
+        sigreg_module = SIGReg(**cfg.loss.sigreg.kwargs)
+
     optimizers = {
         'model_opt': {
             "modules": 'model',
@@ -173,13 +210,25 @@ def run(cfg):
         },
     }
 
-    data_module = spt.data.DataModule(train=train, val=val)
-    world_model = spt.Module(
-        model = world_model,
-        sigreg = SIGReg(**cfg.loss.sigreg.kwargs),
+    module_kwargs = dict(
+        model=world_model,
+        sigreg=sigreg_module,
         forward=partial(lejepa_forward, cfg=cfg),
         optim=optimizers,
     )
+
+    # --- Route 3: Spectral regularizer (has learnable params) ---
+    spectral_cfg = cfg.loss.get("spectral_reg", None)
+    if spectral_cfg is not None and spectral_cfg.get("enabled", False):
+        module_kwargs["spectral_reg"] = SpectralRegularizer(**spectral_cfg.kwargs)
+        optimizers['spectral_opt'] = {
+            "modules": 'spectral_reg',
+            "optimizer": {"type": "AdamW", "lr": 1e-4, "weight_decay": 0},
+            "interval": "epoch",
+        }
+
+    data_module = spt.data.DataModule(train=train, val=val)
+    world_model = spt.Module(**module_kwargs)
 
     ##########################
     ##       training       ##
@@ -187,7 +236,7 @@ def run(cfg):
 
     run_id = cfg.get("subdir") or ""
     # run_dir = Path(swm.data.utils.get_cache_dir(), run_id)
-    run_dir = Path("/kaggle/working/outputs", run_id)
+    run_dir = Path("/home/cs/le-wm/outputs", run_id)
 
     logger = None
     if cfg.wandb.enabled:

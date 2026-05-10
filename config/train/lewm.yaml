@@ -5,7 +5,7 @@ defaults:
 output_model_name: lewm
 subdir: ${hydra:job.id}
 
-num_workers: 12
+num_workers: 6
 train_split: 0.9
 seed: 3072
 img_size: 224
@@ -21,7 +21,7 @@ trainer:
   gradient_clip_val: 1.0
 
 loader:
-  batch_size: 128
+  batch_size: 192
   num_workers: ${num_workers}
   persistent_workers: True
   prefetch_factor: 3
@@ -35,7 +35,7 @@ optimizer:
 wandb:
   enabled: True
   config:
-    entity: shuangc24
+    entity: adamsc
     project: lewm
     name: ${output_model_name}
     id: ${subdir}
@@ -59,9 +59,36 @@ predictor:
 loss:
   sigreg:
     weight: 0.09
+    # type: gaussian   → standard SIGReg (default)
+    # type: t_dist     → t-distribution SIGReg (heavy-tail target)
+    type: t_dist
     kwargs:
       knots: 17
       num_proj: 1024
+      # --- gaussian-only params (ignored when type=t_dist) ---
       dim: 192      # must match wm.embed_dim
       rho: 0.5      # 0.0 = original isotropic; try 0.3/0.5 for adaptive diagonal
       beta_sigma: 1e-3
+      # --- t_dist-only params (ignored when type=gaussian) ---
+      nu: 3.0       # degrees of freedom: 3 (heavy) → 5 → 10 → 30+ (≈ gaussian)
+      t_max: 4.0    # upper limit of integration interval (t-dist CF decays slower)
+
+  # Route 1: effective rank maximisation (no learnable params; composable with any SIGReg)
+  rank_reg:
+    enabled: false
+    weight: 0.01
+    min_var_threshold: 0.01
+
+  # Route 2: soft-whitening SIGReg (replaces SIGReg; set sigreg.kwargs.rho to 0)
+  soft_whiten:
+    enabled: false
+
+  # Route 3: learnable spectral shape (composable with SIGReg rho=0)
+  spectral_reg:
+    enabled: false
+    weight: 0.01
+    kwargs:
+      dim: 192      # must match wm.embed_dim
+      init_decay: 0.02
+      max_decay: 5.0
+      decay_penalty: 0.01
